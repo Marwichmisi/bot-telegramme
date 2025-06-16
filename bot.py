@@ -3,80 +3,72 @@ import time
 from datetime import datetime, timedelta
 import pytz
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, Filters, CallbackQueryHandler
+from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters, CallbackQueryHandler
 import os
 import re
 
 # États pour les conversations
 SET_TIMEZONE, SET_REMINDER_NAME, SET_REMINDER_TIME, DELETE_CHOOSE, MODIF_CHOOSE, MODIF_FIELD, MODIF_VALUE = range(7)
 
-# Initialiser la base de données
-def init_db():
-    conn = sqlite3.connect('reminders.db')
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users
-                 (user_id INTEGER PRIMARY KEY, timezone TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS reminders
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, name TEXT, reminder_time INTEGER, is_daily INTEGER)''')
-    conn.commit()
-    conn.close()
+# Gestion de la base de données avec contexte
+def get_db_connection():
+    return sqlite3.connect('reminders.db')
 
-# Gestion du fuseau horaire
+def init_db():
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS users
+                     (user_id INTEGER PRIMARY KEY, timezone TEXT)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS reminders
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, name TEXT, reminder_time INTEGER, is_daily INTEGER)''')
+        conn.commit()
+
 def get_user_timezone(user_id):
-    conn = sqlite3.connect('reminders.db')
-    c = conn.cursor()
-    c.execute("SELECT timezone FROM users WHERE user_id = ?", (user_id,))
-    result = c.fetchone()
-    conn.close()
-    return result[0] if result else None
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("SELECT timezone FROM users WHERE user_id = ?", (user_id,))
+        result = c.fetchone()
+        return result[0] if result else None
 
 def set_user_timezone(user_id, timezone):
-    conn = sqlite3.connect('reminders.db')
-    c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO users (user_id, timezone) VALUES (?, ?)", (user_id, timezone))
-    conn.commit()
-    conn.close()
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("INSERT OR REPLACE INTO users (user_id, timezone) VALUES (?, ?)", (user_id, timezone))
+        conn.commit()
 
-# Gestion des rappels
 def add_reminder(user_id, name, reminder_time, is_daily=0):
-    conn = sqlite3.connect('reminders.db')
-    c = conn.cursor()
-    c.execute("INSERT INTO reminders (user_id, name, reminder_time, is_daily) VALUES (?, ?, ?, ?)",
-              (user_id, name, reminder_time, is_daily))
-    conn.commit()
-    conn.close()
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("INSERT INTO reminders (user_id, name, reminder_time, is_daily) VALUES (?, ?, ?, ?)",
+                  (user_id, name, reminder_time, is_daily))
+        conn.commit()
 
 def get_reminders(user_id):
-    conn = sqlite3.connect('reminders.db')
-    c = conn.cursor()
-    c.execute("SELECT id, name, reminder_time, is_daily FROM reminders WHERE user_id = ?", (user_id,))
-    result = c.fetchall()
-    conn.close()
-    return result
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("SELECT id, name, reminder_time, is_daily FROM reminders WHERE user_id = ?", (user_id,))
+        return c.fetchall()
 
 def delete_reminder(reminder_id):
-    conn = sqlite3.connect('reminders.db')
-    c = conn.cursor()
-    c.execute("DELETE FROM reminders WHERE id = ?", (reminder_id,))
-    conn.commit()
-    conn.close()
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("DELETE FROM reminders WHERE id = ?", (reminder_id,))
+        conn.commit()
 
 def clear_reminders(user_id):
-    conn = sqlite3.connect('reminders.db')
-    c = conn.cursor()
-    c.execute("DELETE FROM reminders WHERE user_id = ?", (user_id,))
-    conn.commit()
-    conn.close()
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("DELETE FROM reminders WHERE user_id = ?", (user_id,))
+        conn.commit()
 
 def modify_reminder(reminder_id, field, value):
-    conn = sqlite3.connect('reminders.db')
-    c = conn.cursor()
-    if field == "name":
-        c.execute("UPDATE reminders SET name = ? WHERE id = ?", (value, reminder_id))
-    elif field == "time":
-        c.execute("UPDATE reminders SET reminder_time = ? WHERE id = ?", (value, reminder_id))
-    conn.commit()
-    conn.close()
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        if field == "name":
+            c.execute("UPDATE reminders SET name = ? WHERE id = ?", (value, reminder_id))
+        elif field == "time":
+            c.execute("UPDATE reminders SET reminder_time = ? WHERE id = ?", (value, reminder_id))
+        conn.commit()
 
 # Conversion des temps
 def local_to_utc(user_timezone, local_time_str):
@@ -84,33 +76,30 @@ def local_to_utc(user_timezone, local_time_str):
         local_tz = pytz.timezone(user_timezone)
         local_time = datetime.strptime(local_time_str, '%Y-%m-%d %H:%M')
         local_time = local_tz.localize(local_time)
-        utc_time = local_time.astimezone(pytz.utc)
-        return int(utc_time.timestamp())
-    except Exception:
+        return int(local_time.astimezone(pytz.utc).timestamp())
+    except (ValueError, pytz.exceptions.UnknownTimeZoneError):
         return None
 
 def utc_to_local(user_timezone, timestamp):
     try:
         local_tz = pytz.timezone(user_timezone)
         utc_time = datetime.fromtimestamp(timestamp, tz=pytz.utc)
-        local_time = utc_time.astimezone(local_tz)
-        return local_time.strftime('%Y-%m-%d %H:%M')
-    except Exception:
+        return utc_time.astimezone(local_tz).strftime('%Y-%m-%d %H:%M')
+    except (ValueError, pytz.exceptions.UnknownTimeZoneError):
         return "Heure invalide"
 
-# Commande /start
+# Commandes
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     timezone = get_user_timezone(user_id)
     if not timezone:
-        await update.message.reply_text("🎉 Bienvenue chez @MySkeddyBot ! Avant de commencer, définis ton fuseau horaire (ex : Europe/Paris) :")
+        await update.message.reply_text("🎉 Bienvenue chez @SmartSkeddyBot ! Avant de commencer, définis ton fuseau horaire (ex : Europe/Paris) :")
         return SET_TIMEZONE
-    await update.message.reply_text("🎉 Salut ! Je suis @MySkeddyBot, ton assistant pour ne rien oublier. Tape /help pour voir ce que je peux faire ! 😊")
+    await update.message.reply_text("🎉 Salut ! Je suis @SmartSkeddyBot, ton assistant pour ne rien oublier. Tape /help pour voir ce que je peux faire ! 😊")
     return ConversationHandler.END
 
-# Commande /timezone
 async def timezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Entre ton fuseau horaire (ex : Europe/Paris, America/New_York) :")
+    await update.message.reply_text("Entre ton fuseau horaire (ex : Europe/Paris, Africa/Lagos) :")
     return SET_TIMEZONE
 
 async def receive_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -120,12 +109,11 @@ async def receive_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pytz.timezone(timezone)
         set_user_timezone(user_id, timezone)
         await update.message.reply_text(f"✅ Fuseau horaire défini à {timezone}. Tape /help pour commencer !")
+        return ConversationHandler.END
     except pytz.exceptions.UnknownTimeZoneError:
-        await update.message.reply_text("❌ Fuseau horaire invalide. Réessaie (ex : Europe/Paris).")
+        await update.message.reply_text("❌ Fuseau horaire invalide. Réessaie (ex : Europe/Paris, Africa/Lagos).")
         return SET_TIMEZONE
-    return ConversationHandler.END
 
-# Commande /setreminder
 async def set_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     timezone = get_user_timezone(user_id)
@@ -156,14 +144,10 @@ async def receive_reminder_time(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("❌ Erreur dans la date. Réessaie.")
     return ConversationHandler.END
 
-# Commande /daily
 async def daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     timezone = get_user_timezone(user_id)
-    if not timezone:
-        await update.message.reply_text("❌ Définis d'abord ton fuseau horaire avec /timezone.")
-        return
-    if len(context.args) < 2:
+    if not timezone or len(context.args) < 2:
         await update.message.reply_text("Utilise : /daily 'nom' 'HH:MM' (ex : /daily Réunion 09:00)")
         return
     name = context.args[0]
@@ -177,10 +161,9 @@ async def daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reminder_timestamp = local_to_utc(timezone, reminder_time.strftime('%Y-%m-%d %H:%M'))
         add_reminder(user_id, name, reminder_timestamp, is_daily=1)
         await update.message.reply_text(f"✅ Rappel quotidien '{name}' programmé à {time_str} chaque jour.")
-    except Exception as e:
+    except (ValueError, pytz.exceptions.UnknownTimeZoneError) as e:
         await update.message.reply_text(f"❌ Erreur : {str(e)}. Utilise HH:MM (ex : 09:00).")
 
-# Commande /liste
 async def liste(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     timezone = get_user_timezone(user_id)
@@ -199,17 +182,13 @@ async def liste(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message += f"{reminder_id}. {name} - {local_time}{daily_text}\n"
     await update.message.reply_text(message)
 
-# Commande /delete
 async def delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     reminders = get_reminders(user_id)
     if not reminders:
         await update.message.reply_text("😴 Aucun rappel à supprimer.")
         return
-    keyboard = []
-    for reminder in reminders:
-        reminder_id, name, _, _ = reminder
-        keyboard.append([InlineKeyboardButton(f"{name}", callback_data=f"delete_{reminder_id}")])
+    keyboard = [[InlineKeyboardButton(f"{name}", callback_data=f"delete_{reminder_id}") for reminder_id, name, _, _ in [reminder]] for reminder in reminders]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("Choisis le rappel à supprimer :", reply_markup=reply_markup)
     return DELETE_CHOOSE
@@ -224,7 +203,6 @@ async def delete_choose(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("✅ Rappel supprimé.")
     return ConversationHandler.END
 
-# Commande /modif
 async def modif(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     reminders = get_reminders(user_id)
@@ -232,10 +210,7 @@ async def modif(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("😴 Aucun rappel à modifier.")
         return ConversationHandler.END
     context.user_data['reminders'] = reminders
-    keyboard = []
-    for reminder in reminders:
-        reminder_id, name, _, _ = reminder
-        keyboard.append([InlineKeyboardButton(f"{name}", callback_data=f"modif_{reminder_id}")])
+    keyboard = [[InlineKeyboardButton(f"{name}", callback_data=f"modif_{reminder_id}") for reminder_id, name, _, _ in [reminder]] for reminder in reminders]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("Choisis le rappel à modifier :", reply_markup=reply_markup)
     return MODIF_CHOOSE
@@ -280,16 +255,13 @@ async def modif_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return MODIF_VALUE
     return ConversationHandler.END
 
-# Commande /clear
 async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     reminders = get_reminders(user_id)
     if not reminders:
         await update.message.reply_text("😴 Aucun rappel à supprimer.")
         return
-    keyboard = [
-        [InlineKeyboardButton("Oui", callback_data="clear_yes"), InlineKeyboardButton("Non", callback_data="clear_no")]
-    ]
+    keyboard = [[InlineKeyboardButton("Oui", callback_data="clear_yes"), InlineKeyboardButton("Non", callback_data="clear_no")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("Veux-tu vraiment supprimer tous tes rappels ?", reply_markup=reply_markup)
 
@@ -305,10 +277,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("Opération annulée.")
         await query.edit_message_text("❌ Opération annulée.")
 
-# Commande /help
-async def help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = """
-📋 Commandes de @MySkeddyBot :
+📋 Commandes de @SmartSkeddyBot :
 - /start : Message de bienvenue.
 - /timezone : Définir ton fuseau horaire.
 - /setreminder : Programmer un rappel unique.
@@ -318,74 +289,67 @@ async def help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 - /modif : Modifier un rappel.
 - /clear : Supprimer tous les rappels.
 - /help : Afficher cette aide.
-😊 Partage @MySkeddyBot avec tes amis !
+😊 Partage @SmartSkeddyBot avec tes amis !
 """
     await update.message.reply_text(message)
 
-# Vérifier les rappels
 async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
-    conn = sqlite3.connect('reminders.db')
-    c = conn.cursor()
-    current_time = int(time.time())
-    c.execute("SELECT id, user_id, name, reminder_time, is_daily FROM reminders WHERE reminder_time <= ?", (current_time,))
-    reminders = c.fetchall()
-    for reminder in reminders:
-        reminder_id, user_id, name, timestamp, is_daily = reminder
-        timezone = get_user_timezone(user_id)
-        local_time = utc_to_local(timezone, timestamp)
-        await context.bot.send_message(chat_id=user_id, text=f"⏰ Rappel : {name} à {local_time}")
-        if is_daily:
-            local_tz = pytz.timezone(timezone)
-            local_time = datetime.fromtimestamp(timestamp, tz=pytz.utc).astimezone(local_tz)
-            next_day = local_time + timedelta(days=1)
-            next_timestamp = int(next_day.astimezone(pytz.utc).timestamp())
-            add_reminder(user_id, name, next_timestamp, is_daily=1)
-        delete_reminder(reminder_id)
-    conn.close()
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        current_time = int(time.time())
+        c.execute("SELECT id, user_id, name, reminder_time, is_daily FROM reminders WHERE reminder_time <= ?", (current_time,))
+        reminders = c.fetchall()
+        for reminder in reminders:
+            reminder_id, user_id, name, timestamp, is_daily = reminder
+            timezone = get_user_timezone(user_id)
+            if timezone:
+                local_time = utc_to_local(timezone, timestamp)
+                await context.bot.send_message(chat_id=user_id, text=f"⏰ Rappel : {name} à {local_time}")
+                if is_daily:
+                    local_tz = pytz.timezone(timezone)
+                    local_time = datetime.fromtimestamp(timestamp, tz=pytz.utc).astimezone(local_tz)
+                    next_day = local_time + timedelta(days=1)
+                    next_timestamp = int(next_day.astimezone(pytz.utc).timestamp())
+                    add_reminder(user_id, name, next_timestamp, is_daily=1)
+            delete_reminder(reminder_id)
 
 def main():
     init_db()
     app = Application.builder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
 
-    # Conversation pour /timezone
+    # Conversations
     timezone_conv = ConversationHandler(
         entry_points=[CommandHandler("timezone", timezone), CommandHandler("start", start)],
-        states={
-            SET_TIMEZONE: [MessageHandler(Filters.text & ~Filters.command, receive_timezone)]
-        },
+        states={SET_TIMEZONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_timezone)]},
         fallbacks=[]
     )
 
-    # Conversation pour /setreminder
     reminder_conv = ConversationHandler(
         entry_points=[CommandHandler("setreminder", set_reminder)],
         states={
-            SET_REMINDER_NAME: [MessageHandler(Filters.text & ~Filters.command, receive_reminder_name)],
-            SET_REMINDER_TIME: [MessageHandler(Filters.text & ~Filters.command, receive_reminder_time)]
+            SET_REMINDER_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_reminder_name)],
+            SET_REMINDER_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_reminder_time)]
         },
         fallbacks=[]
     )
 
-    # Conversation pour /delete
     delete_conv = ConversationHandler(
         entry_points=[CommandHandler("delete", delete)],
-        states={
-            DELETE_CHOOSE: [CallbackQueryHandler(delete_choose)]
-        },
+        states={DELETE_CHOOSE: [CallbackQueryHandler(delete_choose)]},
         fallbacks=[]
     )
 
-    # Conversation pour /modif
     modif_conv = ConversationHandler(
         entry_points=[CommandHandler("modif", modif)],
         states={
             MODIF_CHOOSE: [CallbackQueryHandler(modif_choose)],
-            MODIF_FIELD: [MessageHandler(Filters.text & ~Filters.command, modif_field)],
-            MODIF_VALUE: [MessageHandler(Filters.text & ~Filters.command, modif_value)]
+            MODIF_FIELD: [MessageHandler(filters.TEXT & ~filters.COMMAND, modif_field)],
+            MODIF_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, modif_value)]
         },
         fallbacks=[]
     )
 
+    # Ajout des handlers
     app.add_handler(timezone_conv)
     app.add_handler(reminder_conv)
     app.add_handler(delete_conv)
@@ -393,11 +357,13 @@ def main():
     app.add_handler(CommandHandler("daily", daily))
     app.add_handler(CommandHandler("liste", liste))
     app.add_handler(CommandHandler("clear", clear))
-    app.add_handler(CommandHandler("help", help))
+    app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CallbackQueryHandler(button_handler))
 
+    # Planification des rappels
     app.job_queue.run_repeating(check_reminders, interval=60)
 
+    # Lancement
     app.run_polling()
 
 if __name__ == '__main__':
