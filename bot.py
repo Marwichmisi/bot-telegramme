@@ -364,7 +364,7 @@ def main():
     app.job_queue.run_repeating(check_reminders, interval=60)
 
     # Lancement
-    app.run_polling()
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
     main()
